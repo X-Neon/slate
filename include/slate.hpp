@@ -10,48 +10,76 @@
 
 namespace slate {
 
-template<typename T>
-struct is_optional : public std::false_type {};
-
-template<typename T>
-struct is_optional<std::optional<T>> : public std::true_type { using type = T; };
-
-// template <typename T>
-// struct optional_value {};
-
-// template <typename T>
-// struct optional_value<std::optional<T>> { using type = T; };
-
-template <typename T, typename... Ts>
-auto build(sqlite3_stmt* stmt, int index) {
-    if constexpr (sizeof...(Ts) == 0) {
-        return std::tuple<T>{extract<T>(stmt, index)};
-    } else {
-        return std::tuple_cat(std::tuple<T>{extract<T>(stmt, index)}, build<Ts...>(stmt, index + 1));
+class exception : public std::exception
+{
+public:
+    exception(int code) : m_code(code) {}
+    int code() const noexcept { return m_code; }
+    const char* what() const noexcept override {
+        return sqlite3_errstr(m_code);
     }
-}
 
-template <typename T>
-T extract(sqlite3_stmt* stmt, int index) {
-    if constexpr (is_optional<T>()) {
-        if (sqlite3_column_type(stmt, index) == SQLITE_NULL) {
-            return {};
+private:
+    int m_code;
+};
+
+namespace detail {
+
+    template<typename T>
+    struct is_optional : public std::false_type {};
+
+    template<typename T>
+    struct is_optional<std::optional<T>> : public std::true_type { using type = T; };
+
+    template <typename T, typename... Ts>
+    auto build(sqlite3_stmt* stmt, int index) {
+        if constexpr (sizeof...(Ts) == 0) {
+            return std::tuple<T>{extract<T>(stmt, index)};
         } else {
-            return extract<is_optional<T>::type>(stmt, index);
+            return std::tuple_cat(std::tuple<T>{extract<T>(stmt, index)}, build<Ts...>(stmt, index + 1));
         }
-    } else if constexpr (std::is_integral_v<T>) {
-        return sqlite3_column_int64(stmt, index);
-    } else if constexpr (std::is_floating_point_v<T>) {
-        return sqlite3_column_double(stmt, index);
-    } else if constexpr (std::is_same_v<T, std::string>) {
-        auto ptr = reinterpret_cast<const char*>(sqlite3_column_text(stmt, index));
-        return std::string(ptr);
-    } else if constexpr (std::is_same_v<T, std::vector<std::byte>>) {
-        int size = sqlite3_column_bytes(stmt, index);
-        const std::byte* ptr = sqlite3_column_blob(stmt, index);
-        return std::vector<std::byte>(ptr, ptr + size);
     }
-}
+
+    template <typename T>
+    T extract(sqlite3_stmt* stmt, int index) {
+        if constexpr (is_optional<T>()) {
+            if (sqlite3_column_type(stmt, index) == SQLITE_NULL) {
+                return {};
+            } else {
+                return extract<is_optional<T>::type>(stmt, index);
+            }
+        } else if constexpr (std::is_integral_v<T>) {
+            return sqlite3_column_int64(stmt, index);
+        } else if constexpr (std::is_floating_point_v<T>) {
+            return sqlite3_column_double(stmt, index);
+        } else if constexpr (std::is_same_v<T, std::string>) {
+            auto ptr = reinterpret_cast<const char*>(sqlite3_column_text(stmt, index));
+            return std::string(ptr);
+        } else if constexpr (std::is_same_v<T, std::vector<std::byte>>) {
+            int size = sqlite3_column_bytes(stmt, index);
+            const std::byte* ptr = sqlite3_column_blob(stmt, index);
+            return std::vector<std::byte>(ptr, ptr + size);
+        }
+    }
+
+    void check(int code) {
+        if (code != SQLITE_OK) {
+            throw exception(code);
+        }
+    }
+
+    bool step(sqlite3_stmt* stmt) {
+        auto result = sqlite3_step(stmt);
+        if (result == SQLITE_DONE) {
+            return true;
+        } else if (result == SQLITE_ROW) {
+            return false;
+        } else {
+            throw exception(result);
+        }
+    }
+
+} // namespace detail
 
 template <typename... Types>
 class cursor
@@ -68,16 +96,12 @@ class cursor
         iterator(std::shared_ptr<sqlite3_stmt> stmt) : m_stmt(std::move(stmt)) {}
 
         iterator& operator++() {
-            auto result = sqlite3_step(m_stmt.get());
-            if (result == SQLITE_DONE) {
-                m_done = true;
-            }
-
+            m_done = detail::step(m_stmt.get());
             return *this;
         }
         void operator++(int) { ++*this; }
         
-        std::tuple<Types...> operator*() const { return build<Types...>(m_stmt.get(), 0); }
+        std::tuple<Types...> operator*() const { return detail::build<Types...>(m_stmt.get(), 0); }
         bool operator==(const sentinel&) const noexcept { return m_done; }
 
     private:
@@ -109,15 +133,11 @@ class value_cursor
         iterator(std::shared_ptr<sqlite3_stmt> stmt) : m_stmt(std::move(stmt)) {}
 
         iterator& operator++() {
-            auto result = sqlite3_step(m_stmt.get());
-            if (result == SQLITE_DONE) {
-                m_done = true;
-            }
-
+            m_done = detail::step(m_stmt.get());
             return *this;
         }
         
-        T operator*() const { return extract<T>(m_stmt.get(), 0); }
+        T operator*() const { return detail::extract<T>(m_stmt.get(), 0); }
         bool operator==(const sentinel&) const noexcept { return m_done; }
 
     private:
@@ -142,13 +162,13 @@ public:
     template <typename... Args>
     statement& execute(const Args&... args) {
         if (m_reset) {
-            sqlite3_reset(m_stmt.get());
+            detail::check(sqlite3_reset(m_stmt.get()));
         }
         m_reset = true;
 
         int index = 1;
         (bind(args, index), ...);
-        sqlite3_step(m_stmt.get());
+        detail::step(m_stmt.get());
 
         return *this;
     }
@@ -175,30 +195,30 @@ public:
 
 private:
     static void stmt_deleter(sqlite3_stmt* ptr) {
-        sqlite3_finalize(ptr);
+        detail::check(sqlite3_finalize(ptr));
     }
 
     template <typename T>
     void bind(const T& val, int& index) {
-        if constexpr (is_optional<T>()) {
+        if constexpr (detail::is_optional<T>()) {
             if (val) {
                 bind(*val, index);
                 return;
             } else {
-                sqlite3_bind_null(m_stmt.get(), index);
+                detail::check(sqlite3_bind_null(m_stmt.get(), index));
             }
         } else if constexpr (std::is_integral_v<T>) {
-            sqlite3_bind_int64(m_stmt.get(), index, val);
+            detail::check(sqlite3_bind_int64(m_stmt.get(), index, val));
         } else if constexpr (std::is_floating_point_v<T>) {
-            sqlite3_bind_double(m_stmt.get(), index, val);
+            detail::check(sqlite3_bind_double(m_stmt.get(), index, val));
         } else if constexpr (std::is_same_v<T, std::nullopt_t>) {
-            sqlite3_bind_null(m_stmt.get(), index);
+            detail::check(sqlite3_bind_null(m_stmt.get(), index));
         } else if constexpr (std::is_convertible_v<T, std::string_view>) {
             std::string_view view(val);
-            sqlite3_bind_text(m_stmt.get(), index, view.data(), view.size(), SQLITE_TRANSIENT);
+            detail::check(sqlite3_bind_text(m_stmt.get(), index, view.data(), view.size(), SQLITE_TRANSIENT));
         } else if constexpr (std::is_convertible_v<T, std::span<std::byte>>) {
             std::span<std::byte> span(val);
-            sqlite3_bind_blob(m_stmt.get(), index, span.data(), span.size(), SQLITE_TRANSIENT);
+            detail::check(sqlite3_bind_blob(m_stmt.get(), index, span.data(), span.size(), SQLITE_TRANSIENT));
         }
 
         index++;
@@ -215,16 +235,13 @@ class db
 public:
     db(std::string_view filename) : m_db(nullptr, db_deleter) {
         sqlite3* ptr;
-        if (sqlite3_open(filename.data(), &ptr) != SQLITE_OK) {
-            throw std::runtime_error(sqlite3_errmsg(ptr));
-        }
-
+        detail::check(sqlite3_open(filename.data(), &ptr));
         m_db = sqlite_ptr(ptr, db_deleter);
     }
 
     statement prepare(std::string_view cmd) {
         sqlite3_stmt* stmt;
-        sqlite3_prepare_v2(m_db.get(), cmd.data(), cmd.size(), &stmt, nullptr);
+        detail::check(sqlite3_prepare_v2(m_db.get(), cmd.data(), cmd.size(), &stmt, nullptr));
         return statement(stmt);
     }
 
@@ -235,7 +252,7 @@ public:
 
 private:
     static void db_deleter(sqlite3* ptr) {
-        sqlite3_close(ptr);
+        detail::check(sqlite3_close(ptr));
     }
 
     sqlite_ptr m_db;
