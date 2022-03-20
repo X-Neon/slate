@@ -8,6 +8,13 @@
 #include <vector>
 #include <string>
 
+#if defined __has_include
+#  if __has_include ("pfr.hpp")
+#    include "pfr.hpp"
+#  endif
+#endif
+
+
 namespace slate {
 
 class exception : public std::exception
@@ -25,39 +32,90 @@ private:
 
 namespace detail {
 
-    template<typename T>
+    template <typename T>
     struct is_optional : public std::false_type {};
 
-    template<typename T>
+    template <typename T>
     struct is_optional<std::optional<T>> : public std::true_type { using type = T; };
 
+#ifdef PFR_HPP
+    template <std::size_t I>
+    using size_constant = std::integral_constant<std::size_t, I>;
+
+    template <typename T, typename I, typename M>
+    constexpr int aggregate_size();
+
+    template <typename T>
+    constexpr int field_size() {
+        if constexpr (std::is_aggregate_v<T>) {
+            return aggregate_size<T, size_constant<0>, size_constant<pfr::tuple_size_v<T>>>();
+        } else {
+            return 1;
+        }
+    }
+
+    template <typename T, typename I, typename M>
+    constexpr int aggregate_size() {
+        if constexpr(I() < M()) {
+            return field_size<pfr::tuple_element_t<I()+0, T>>() + aggregate_size<T, size_constant<I()+1>, M>();
+        } else {
+            return 0;
+        }
+    }
+
     template <typename T, typename... Ts>
-    auto build(sqlite3_stmt* stmt, int index) {
+    constexpr int row_size() {
+        if constexpr (sizeof...(Ts) == 0) {
+            return field_size<T>();
+        } else {
+            return field_size<T>() + row_size<Ts...>();
+        }
+    }
+#else
+    template <typename... Ts>
+    constexpr int row_size() {
+        return sizeof...(Ts);
+    }
+#endif
+
+    template <typename T, typename... Ts>
+    auto build(sqlite3_stmt* stmt, int& index) {
         if constexpr (sizeof...(Ts) == 0) {
             return std::tuple<T>{extract<T>(stmt, index)};
         } else {
-            return std::tuple_cat(std::tuple<T>{extract<T>(stmt, index)}, build<Ts...>(stmt, index + 1));
+            auto t = std::tuple<T>{extract<T>(stmt, index)};
+            return std::tuple_cat(std::move(t), build<Ts...>(stmt, index));
         }
     }
 
     template <typename T>
-    T extract(sqlite3_stmt* stmt, int index) {
+    T extract(sqlite3_stmt* stmt, int& index) {
+#ifdef PFR_HPP
+        if constexpr (std::is_aggregate_v<T>) {
+            T val;
+            pfr::for_each_field(val, [&](auto& v) {
+                v = extract<std::remove_reference_t<decltype(v)>>(stmt, index);
+            });
+            return val;
+        }
+#endif
+
         if constexpr (is_optional<T>()) {
-            if (sqlite3_column_type(stmt, index) == SQLITE_NULL) {
+            if (sqlite3_column_type(stmt, index++) == SQLITE_NULL) {
                 return {};
             } else {
-                return extract<is_optional<T>::type>(stmt, index);
+                return extract<is_optional<T>::type>(stmt, index++);
             }
         } else if constexpr (std::is_integral_v<T>) {
-            return sqlite3_column_int64(stmt, index);
+            return sqlite3_column_int64(stmt, index++);
         } else if constexpr (std::is_floating_point_v<T>) {
-            return sqlite3_column_double(stmt, index);
+            return sqlite3_column_double(stmt, index++);
         } else if constexpr (std::is_same_v<T, std::string>) {
-            auto ptr = reinterpret_cast<const char*>(sqlite3_column_text(stmt, index));
+            auto ptr = reinterpret_cast<const char*>(sqlite3_column_text(stmt, index++));
             return std::string(ptr);
         } else if constexpr (std::is_same_v<T, std::vector<std::byte>>) {
             int size = sqlite3_column_bytes(stmt, index);
-            const std::byte* ptr = sqlite3_column_blob(stmt, index);
+            const std::byte* ptr = sqlite3_column_blob(stmt, index++);
             return std::vector<std::byte>(ptr, ptr + size);
         }
     }
@@ -93,7 +151,11 @@ class cursor
         using difference_type = ptrdiff_t;
 
         iterator() = default;
-        iterator(std::shared_ptr<sqlite3_stmt> stmt) : m_stmt(std::move(stmt)) {}
+        iterator(std::shared_ptr<sqlite3_stmt> stmt) : m_stmt(std::move(stmt)) {
+            if (sqlite3_column_count(m_stmt.get()) != detail::row_size<Types...>()) {
+                throw std::out_of_range("Mismatch between query column count and extraction field count");
+            }
+        }
 
         iterator& operator++() {
             m_done = detail::step(m_stmt.get());
@@ -101,7 +163,10 @@ class cursor
         }
         void operator++(int) { ++*this; }
         
-        std::tuple<Types...> operator*() const { return detail::build<Types...>(m_stmt.get(), 0); }
+        std::tuple<Types...> operator*() const {
+            int i = 0;
+            return detail::build<Types...>(m_stmt.get(), i); 
+        }
         bool operator==(const sentinel&) const noexcept { return m_done; }
 
     private:
@@ -130,14 +195,21 @@ class value_cursor
         using difference_type = ptrdiff_t;
 
         iterator() = default;
-        iterator(std::shared_ptr<sqlite3_stmt> stmt) : m_stmt(std::move(stmt)) {}
+        iterator(std::shared_ptr<sqlite3_stmt> stmt) : m_stmt(std::move(stmt)) {
+            if (sqlite3_column_count(m_stmt.get()) != detail::row_size<T>()) {
+                throw std::out_of_range("Mismatch between query column count and extraction field count");
+            }
+        }
 
         iterator& operator++() {
             m_done = detail::step(m_stmt.get());
             return *this;
         }
         
-        T operator*() const { return detail::extract<T>(m_stmt.get(), 0); }
+        T operator*() const {
+            int i = 0;
+            return detail::extract<T>(m_stmt.get(), i); 
+        }
         bool operator==(const sentinel&) const noexcept { return m_done; }
 
     private:
@@ -200,6 +272,15 @@ private:
 
     template <typename T>
     void bind(const T& val, int& index) {
+#ifdef PFR_HPP
+        if constexpr (std::is_aggregate_v<T>) {
+            pfr::for_each_field(val, [&](const auto& v) {
+                bind(v, index);
+            });
+            return;
+        }
+#endif
+
         if constexpr (detail::is_optional<T>()) {
             if (val) {
                 bind(*val, index);
