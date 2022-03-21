@@ -80,12 +80,12 @@ namespace detail {
 #endif
 
     template <typename T, typename... Ts>
-    auto build(sqlite3_stmt* stmt, int& index) {
+    auto build_tuple(sqlite3_stmt* stmt, int& index) {
         if constexpr (sizeof...(Ts) == 0) {
             return std::tuple<T>{extract<T>(stmt, index)};
         } else {
             auto t = std::tuple<T>{extract<T>(stmt, index)};
-            return std::tuple_cat(std::move(t), build<Ts...>(stmt, index));
+            return std::tuple_cat(std::move(t), build_tuple<Ts...>(stmt, index));
         }
     }
 
@@ -119,7 +119,7 @@ namespace detail {
             const std::byte* ptr = sqlite3_column_blob(stmt, index++);
             return std::vector<std::byte>(ptr, ptr + size);
         } else {
-            SLATE_STATIC_FAIL("Invalid extraction type");
+            SLATE_STATIC_FAIL("Invalid output type");
         }
     }
 
@@ -168,7 +168,7 @@ class cursor
         
         std::tuple<Types...> operator*() const {
             int i = 0;
-            return detail::build<Types...>(m_stmt.get(), i); 
+            return detail::build_tuple<Types...>(m_stmt.get(), i); 
         }
         bool operator==(const sentinel&) const noexcept { return m_done; }
 
@@ -314,7 +314,7 @@ private:
             std::span<std::byte> span(val);
             detail::check(sqlite3_bind_blob(m_stmt.get(), index, span.data(), span.size(), SQLITE_TRANSIENT));
         } else {
-            SLATE_STATIC_FAIL("Invalid bind type");
+            SLATE_STATIC_FAIL("Invalid input type");
         }
 
         index++;
