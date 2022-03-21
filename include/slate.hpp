@@ -31,6 +31,14 @@ private:
     int m_code;
 };
 
+enum class convert
+{
+    off,
+    null,
+    non_null,
+    on
+};
+
 namespace detail {
 
     template <typename T>
@@ -79,42 +87,61 @@ namespace detail {
     }
 #endif
 
+    void check_convert(sqlite3_stmt* stmt, int index, int desired, convert c) {
+        if (c == convert::on) {
+            return;
+        }
+
+        int actual = sqlite3_column_type(stmt, index);
+        if (actual == desired) {
+            return;
+        }
+
+        if (c == convert::off || ((c == convert::null) != (actual == SQLITE_NULL))) {
+            throw std::runtime_error("Invalid type conversion requested");
+        }
+    }
+
     template <typename T, typename... Ts>
-    auto build_tuple(sqlite3_stmt* stmt, int& index) {
+    auto build_tuple(sqlite3_stmt* stmt, int& index, convert conv) {
         if constexpr (sizeof...(Ts) == 0) {
-            return std::tuple<T>{extract<T>(stmt, index)};
+            return std::tuple<T>{extract<T>(stmt, index, conv)};
         } else {
-            auto t = std::tuple<T>{extract<T>(stmt, index)};
-            return std::tuple_cat(std::move(t), build_tuple<Ts...>(stmt, index));
+            auto t = std::tuple<T>{extract<T>(stmt, index, conv)};
+            return std::tuple_cat(std::move(t), build_tuple<Ts...>(stmt, index, conv));
         }
     }
 
     template <typename T>
-    T extract(sqlite3_stmt* stmt, int& index) {
+    T extract(sqlite3_stmt* stmt, int& index, convert conv) {
 #ifdef PFR_HPP
         if constexpr (std::is_aggregate_v<T>) {
             T val;
             pfr::for_each_field(val, [&](auto& v) {
-                v = extract<std::remove_reference_t<decltype(v)>>(stmt, index);
+                v = extract<std::remove_reference_t<decltype(v)>>(stmt, index, conv);
             });
             return val;
         } else
 #endif
 
         if constexpr (is_optional<T>()) {
-            if (sqlite3_column_type(stmt, index++) == SQLITE_NULL) {
+            if (sqlite3_column_type(stmt, index) == SQLITE_NULL) {
                 return {};
             } else {
-                return extract<is_optional<T>::type>(stmt, index++);
+                return extract<is_optional<T>::type>(stmt, index, conv);
             }
         } else if constexpr (std::is_integral_v<T>) {
+            check_convert(stmt, index, SQLITE_INTEGER, conv);
             return sqlite3_column_int64(stmt, index++);
         } else if constexpr (std::is_floating_point_v<T>) {
+            check_convert(stmt, index, SQLITE_FLOAT, conv);
             return sqlite3_column_double(stmt, index++);
         } else if constexpr (std::is_same_v<T, std::string>) {
+            check_convert(stmt, index, SQLITE_TEXT, conv);
             auto ptr = reinterpret_cast<const char*>(sqlite3_column_text(stmt, index++));
             return std::string(ptr);
         } else if constexpr (std::is_same_v<T, std::vector<std::byte>>) {
+            check_convert(stmt, index, SQLITE_BLOB, conv);
             int size = sqlite3_column_bytes(stmt, index);
             const std::byte* ptr = sqlite3_column_blob(stmt, index++);
             return std::vector<std::byte>(ptr, ptr + size);
@@ -154,7 +181,7 @@ class cursor
         using difference_type = ptrdiff_t;
 
         iterator() = default;
-        iterator(std::shared_ptr<sqlite3_stmt> stmt) : m_stmt(std::move(stmt)) {
+        iterator(std::shared_ptr<sqlite3_stmt> stmt, convert conv) : m_stmt(std::move(stmt)), m_conv(conv) {
             if (sqlite3_column_count(m_stmt.get()) != detail::row_size<Types...>()) {
                 throw std::out_of_range("Mismatch between query column count and extraction field count");
             }
@@ -168,22 +195,24 @@ class cursor
         
         std::tuple<Types...> operator*() const {
             int i = 0;
-            return detail::build_tuple<Types...>(m_stmt.get(), i); 
+            return detail::build_tuple<Types...>(m_stmt.get(), i, m_conv); 
         }
         bool operator==(const sentinel&) const noexcept { return m_done; }
 
     private:
         std::shared_ptr<sqlite3_stmt> m_stmt;
+        convert m_conv = convert::off;
         bool m_done = false;
     };
 
 public:
-    cursor(std::shared_ptr<sqlite3_stmt> stmt) : m_stmt(std::move(stmt)) {}
-    iterator begin() { return iterator(m_stmt); }
+    cursor(std::shared_ptr<sqlite3_stmt> stmt, convert conv) : m_stmt(std::move(stmt)), m_conv(conv) {}
+    iterator begin() { return iterator(m_stmt, m_conv); }
     sentinel end() { return sentinel{}; }
 
 private:
     std::shared_ptr<sqlite3_stmt> m_stmt;
+    convert m_conv = convert::off;
 };
 
 template <typename T>
@@ -198,7 +227,7 @@ class value_cursor
         using difference_type = ptrdiff_t;
 
         iterator() = default;
-        iterator(std::shared_ptr<sqlite3_stmt> stmt) : m_stmt(std::move(stmt)) {
+        iterator(std::shared_ptr<sqlite3_stmt> stmt, convert conv) : m_stmt(std::move(stmt)), m_conv(conv) {
             if (sqlite3_column_count(m_stmt.get()) != detail::row_size<T>()) {
                 throw std::out_of_range("Mismatch between query column count and extraction field count");
             }
@@ -211,22 +240,24 @@ class value_cursor
         
         T operator*() const {
             int i = 0;
-            return detail::extract<T>(m_stmt.get(), i); 
+            return detail::extract<T>(m_stmt.get(), i, m_conv); 
         }
         bool operator==(const sentinel&) const noexcept { return m_done; }
 
     private:
         std::shared_ptr<sqlite3_stmt> m_stmt;
+        convert m_conv = convert::off;
         bool m_done = false;
     };
 
 public:
-    value_cursor(std::shared_ptr<sqlite3_stmt> stmt) : m_stmt(std::move(stmt)) {}
-    iterator begin() { return iterator(m_stmt); }
+    value_cursor(std::shared_ptr<sqlite3_stmt> stmt, convert conv) : m_stmt(std::move(stmt)), m_conv(conv) {}
+    iterator begin() { return iterator(m_stmt, m_conv); }
     sentinel end() { return sentinel{}; }
 
 private:
     std::shared_ptr<sqlite3_stmt> m_stmt;
+    convert m_conv = convert::off;
 };
 
 class statement
@@ -249,27 +280,27 @@ public:
     }
 
     template <typename... Types>
-    cursor<Types...> fetch() {
+    cursor<Types...> fetch(convert conversion = convert::off) {
         check_fetchable();
-        return cursor<Types...>(m_stmt);
+        return cursor<Types...>(m_stmt, conversion);
     }
 
     template <typename... Types>
-    auto fetch_single() {
+    auto fetch_single(convert conversion = convert::off) {
         check_fetchable();
-        return *cursor<Types...>(m_stmt).begin();
+        return *cursor<Types...>(m_stmt, conversion).begin();
     }
 
     template <typename T>
-    value_cursor<T> fetch_value() {
+    value_cursor<T> fetch_value(convert conversion = convert::off) {
         check_fetchable();
-        return value_cursor<T>(m_stmt);
+        return value_cursor<T>(m_stmt, conversion);
     }
 
     template <typename T>
-    auto fetch_single_value() {
+    auto fetch_single_value(convert conversion = convert::off) {
         check_fetchable();
-        return *value_cursor<T>(m_stmt).begin();
+        return *value_cursor<T>(m_stmt, conversion).begin();
     }
 
 private:
