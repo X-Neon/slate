@@ -14,6 +14,7 @@
 #  endif
 #endif
 
+#define SLATE_STATIC_FAIL(msg) []<bool _ = false>(){ static_assert(_, msg); }();
 
 namespace slate {
 
@@ -97,7 +98,7 @@ namespace detail {
                 v = extract<std::remove_reference_t<decltype(v)>>(stmt, index);
             });
             return val;
-        }
+        } else
 #endif
 
         if constexpr (is_optional<T>()) {
@@ -117,6 +118,8 @@ namespace detail {
             int size = sqlite3_column_bytes(stmt, index);
             const std::byte* ptr = sqlite3_column_blob(stmt, index++);
             return std::vector<std::byte>(ptr, ptr + size);
+        } else {
+            SLATE_STATIC_FAIL("Invalid extraction type");
         }
     }
 
@@ -240,34 +243,44 @@ public:
 
         int index = 1;
         (bind(args, index), ...);
-        detail::step(m_stmt.get());
+        m_fetchable = !detail::step(m_stmt.get());
 
         return *this;
     }
 
     template <typename... Types>
     cursor<Types...> fetch() {
+        check_fetchable();
         return cursor<Types...>(m_stmt);
     }
 
     template <typename... Types>
     auto fetch_single() {
+        check_fetchable();
         return *cursor<Types...>(m_stmt).begin();
     }
 
     template <typename T>
     value_cursor<T> fetch_value() {
+        check_fetchable();
         return value_cursor<T>(m_stmt);
     }
 
     template <typename T>
     auto fetch_single_value() {
+        check_fetchable();
         return *value_cursor<T>(m_stmt).begin();
     }
 
 private:
     static void stmt_deleter(sqlite3_stmt* ptr) {
         detail::check(sqlite3_finalize(ptr));
+    }
+
+    void check_fetchable() const {
+        if (!m_fetchable) {
+            throw std::runtime_error("No rows to fetch");
+        }
     }
 
     template <typename T>
@@ -278,7 +291,7 @@ private:
                 bind(v, index);
             });
             return;
-        }
+        } else
 #endif
 
         if constexpr (detail::is_optional<T>()) {
@@ -300,6 +313,8 @@ private:
         } else if constexpr (std::is_convertible_v<T, std::span<std::byte>>) {
             std::span<std::byte> span(val);
             detail::check(sqlite3_bind_blob(m_stmt.get(), index, span.data(), span.size(), SQLITE_TRANSIENT));
+        } else {
+            SLATE_STATIC_FAIL("Invalid bind type");
         }
 
         index++;
@@ -307,6 +322,7 @@ private:
 
     std::shared_ptr<sqlite3_stmt> m_stmt;
     bool m_reset = false;
+    bool m_fetchable = false;
 };
 
 class db
