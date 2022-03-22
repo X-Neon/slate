@@ -46,6 +46,24 @@ enum class transaction
     exclusive
 };
 
+enum class open
+{
+    read_only = SQLITE_OPEN_READONLY,
+    read_write = SQLITE_OPEN_READWRITE,
+    create = SQLITE_OPEN_CREATE,
+    uri = SQLITE_OPEN_URI,
+    memory = SQLITE_OPEN_MEMORY,
+    no_mutex = SQLITE_OPEN_NOMUTEX,
+    full_mutex = SQLITE_OPEN_FULLMUTEX,
+    shared_cache = SQLITE_OPEN_SHAREDCACHE,
+    private_cache = SQLITE_OPEN_PRIVATECACHE,
+    no_follow = SQLITE_OPEN_NOFOLLOW
+};
+
+constexpr open operator|(const open& a, const open& b) {
+    return {a | b};
+}
+
 namespace detail {
 
     template <typename T>
@@ -391,11 +409,12 @@ class db
     using sqlite_ptr = std::unique_ptr<sqlite3, void(*)(sqlite3*)>;
 
 public:
-    db(std::string_view filename) : m_db(nullptr, db_deleter) {
+    db(std::string_view filename, open flags) : m_db(nullptr, db_deleter) {
         sqlite3* ptr;
-        detail::check(sqlite3_open(filename.data(), &ptr));
+        detail::check(sqlite3_open_v2(filename.data(), &ptr, static_cast<int>(flags), nullptr));
         m_db = sqlite_ptr(ptr, db_deleter);
     }
+    db(std::string_view filename) : db(filename, open::read_write | open::create) {}
 
     statement prepare(std::string_view cmd) {
         sqlite3_stmt* stmt;
@@ -421,7 +440,7 @@ public:
 
 private:
     static void db_deleter(sqlite3* ptr) {
-        detail::check(sqlite3_close(ptr));
+        detail::check(sqlite3_close_v2(ptr));
     }
 
     sqlite_ptr m_db;
