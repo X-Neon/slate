@@ -39,6 +39,13 @@ enum class convert
     on
 };
 
+enum class transaction
+{
+    deferred,
+    immediate,
+    exclusive
+};
+
 namespace detail {
 
     template <typename T>
@@ -115,7 +122,7 @@ namespace detail {
     template <typename T>
     T extract(sqlite3_stmt* stmt, int& index, convert conv) {
 #ifdef PFR_HPP
-        if constexpr (std::is_aggregate_v<T>) {
+        if constexpr (std::is_aggregate_v<T> && !std::is_array_v<T>) {
             T val;
             pfr::for_each_field(val, [&](auto& v) {
                 v = extract<std::remove_reference_t<decltype(v)>>(stmt, index, conv);
@@ -165,6 +172,29 @@ namespace detail {
         } else {
             throw exception(result);
         }
+    }
+
+    constexpr std::string_view begin_deferred = "BEGIN DEFERRED;";
+    constexpr std::string_view begin_immediate = "BEGIN IMMEDIATE;";
+    constexpr std::string_view begin_exclusive = "BEGIN EXCLUSIVE;";
+
+    std::string_view begin_transaction(transaction type) {
+        if (type == transaction::deferred) {
+            return begin_deferred;
+        } else if (type == transaction::immediate) {
+            return begin_immediate;
+        } else {
+            return begin_exclusive;
+        }
+    }
+
+    std::string sql_command(std::string_view cmd, std::string_view arg) {
+        std::string out(cmd.size() + arg.size() + 2, '\0');
+        std::ranges::copy(cmd, out.data());
+        out[cmd.size()] = ' ';
+        std::ranges::copy(arg, out.data() + cmd.size() + 1);
+        out.back() = ';';
+        return out;
     }
 
 } // namespace detail
@@ -317,7 +347,7 @@ private:
     template <typename T>
     void bind(const T& val, int& index) {
 #ifdef PFR_HPP
-        if constexpr (std::is_aggregate_v<T>) {
+        if constexpr (std::is_aggregate_v<T> && !std::is_array_v<T>) {
             pfr::for_each_field(val, [&](const auto& v) {
                 bind(v, index);
             });
@@ -378,12 +408,49 @@ public:
         return prepare(cmd).execute(args...);
     }
 
+    void begin_transaction(transaction type = transaction::deferred) { execute(detail::begin_transaction(type)); }
+    void commit() { execute("END;"); }
+    void rollback() { execute("ROLLBACK;"); }
+    void savepoint(std::string_view name) { execute(detail::sql_command("SAVEPOINT", name)); }
+    void release(std::string_view name) { execute(detail::sql_command("RELEASE", name)); }
+    void rollback_to(std::string_view name) { execute(detail::sql_command("ROLLBACK TO", name)); }
+
+    sqlite3* get_raw() {
+        return m_db.get();
+    }
+
 private:
     static void db_deleter(sqlite3* ptr) {
         detail::check(sqlite3_close(ptr));
     }
 
     sqlite_ptr m_db;
+};
+
+class scoped_transaction
+{
+public:
+    scoped_transaction(db& database, transaction type = transaction::deferred) : m_db(database.get_raw()) {
+        execute(detail::begin_transaction(type));
+    }
+    scoped_transaction(scoped_transaction&&) = delete;
+    scoped_transaction& operator=(scoped_transaction&&) = delete;
+    ~scoped_transaction() {
+        if (std::uncaught_exceptions()) {
+            execute("ROLLBACK;");
+        } else {
+            execute("END;");
+        }
+    }
+
+private:
+    void execute(std::string_view cmd) {
+        sqlite3_stmt* stmt;
+        detail::check(sqlite3_prepare_v2(m_db, cmd.data(), cmd.size(), &stmt, nullptr));
+        statement(stmt).execute();
+    }
+
+    sqlite3* m_db;
 };
 
 }
