@@ -9,14 +9,22 @@
 #include <string>
 
 #if defined __has_include
-#  if __has_include ("pfr.hpp")
-#    include "pfr.hpp"
-#  endif
+#   if __has_include (<boost/pfr.hpp>)
+#       include <boost/pfr.hpp>
+#       define SLATE_USE_PFR
+#       define SLATE_PFR_NAMESPACE namespace pfr = boost::pfr
+#   elif __has_include (<pfr.hpp>)
+#       include <pfr.hpp>
+#       define SLATE_USE_PFR
+#       define SLATE_PFR_NAMESPACE
+#   endif
 #endif
 
 #define SLATE_STATIC_FAIL(msg) []<bool _ = false>(){ static_assert(_, msg); }();
 
 namespace slate {
+
+SLATE_PFR_NAMESPACE;
 
 class exception : public std::exception
 {
@@ -72,7 +80,7 @@ namespace detail {
     template <typename T>
     struct is_optional<std::optional<T>> : public std::true_type { using type = T; };
 
-#ifdef PFR_HPP
+#ifdef SLATE_USE_PFR
     template <std::size_t I>
     using size_constant = std::integral_constant<std::size_t, I>;
 
@@ -139,7 +147,7 @@ namespace detail {
 
     template <typename T>
     T extract(sqlite3_stmt* stmt, int& index, convert conv) {
-#ifdef PFR_HPP
+#ifdef SLATE_USE_PFR
         if constexpr (std::is_aggregate_v<T> && !std::is_array_v<T>) {
             T val;
             pfr::for_each_field(val, [&](auto& v) {
@@ -364,7 +372,7 @@ private:
 
     template <typename T>
     void bind(const T& val, int& index) {
-#ifdef PFR_HPP
+#ifdef SLATE_USE_PFR
         if constexpr (std::is_aggregate_v<T> && !std::is_array_v<T>) {
             pfr::for_each_field(val, [&](const auto& v) {
                 bind(v, index);
