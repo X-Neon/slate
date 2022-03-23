@@ -7,6 +7,7 @@
 #include <span>
 #include <vector>
 #include <string>
+#include <cstring>
 
 #if defined __has_include
 #   if __has_include (<boost/pfr.hpp>)
@@ -69,7 +70,7 @@ enum class open
 };
 
 constexpr open operator|(const open& a, const open& b) {
-    return {a | b};
+    return open{static_cast<int>(a) | static_cast<int>(b)};
 }
 
 namespace detail {
@@ -79,6 +80,12 @@ namespace detail {
 
     template <typename T>
     struct is_optional<std::optional<T>> : public std::true_type { using type = T; };
+
+    template <typename T>
+    struct is_vector : public std::false_type {};
+
+    template <typename T, typename A>
+    struct is_vector<std::vector<T, A>> : public std::true_type { using type = T; };
 
 #ifdef SLATE_USE_PFR
     template <std::size_t I>
@@ -120,7 +127,16 @@ namespace detail {
     }
 #endif
 
-    void check_convert(sqlite3_stmt* stmt, int index, int desired, convert c) {
+    template <typename T>
+    concept is_span_trivial = std::is_trivial_v<typename T::value_type>;
+
+    template <typename T>
+    concept is_byte_span_convertible = requires(T a) {
+        std::as_bytes(std::span(a));
+        { std::span(a) } -> is_span_trivial;
+    };
+
+    inline void check_convert(sqlite3_stmt* stmt, int index, int desired, convert c) {
         if (c == convert::on) {
             return;
         }
@@ -161,7 +177,7 @@ namespace detail {
             if (sqlite3_column_type(stmt, index) == SQLITE_NULL) {
                 return {};
             } else {
-                return extract<is_optional<T>::type>(stmt, index, conv);
+                return extract<typename is_optional<T>::type>(stmt, index, conv);
             }
         } else if constexpr (std::is_integral_v<T>) {
             check_convert(stmt, index, SQLITE_INTEGER, conv);
@@ -173,23 +189,30 @@ namespace detail {
             check_convert(stmt, index, SQLITE_TEXT, conv);
             auto ptr = reinterpret_cast<const char*>(sqlite3_column_text(stmt, index++));
             return std::string(ptr);
-        } else if constexpr (std::is_same_v<T, std::vector<std::byte>>) {
+        } else if constexpr (is_vector<T>()) {
             check_convert(stmt, index, SQLITE_BLOB, conv);
             int size = sqlite3_column_bytes(stmt, index);
-            const std::byte* ptr = sqlite3_column_blob(stmt, index++);
-            return std::vector<std::byte>(ptr, ptr + size);
+            if (size == 0) {
+                return T{};
+            }
+
+            const void* ptr = sqlite3_column_blob(stmt, index++);
+            T vec;
+            vec.resize((size - 1) / sizeof(typename T::value_type) + 1);
+            std::memcpy(vec.data(), ptr, size);
+            return vec;
         } else {
             SLATE_STATIC_FAIL("Invalid output type");
         }
     }
 
-    void check(int code) {
+    inline void check(int code) {
         if (code != SQLITE_OK) {
             throw exception(code);
         }
     }
 
-    bool step(sqlite3_stmt* stmt) {
+    inline bool step(sqlite3_stmt* stmt) {
         auto result = sqlite3_step(stmt);
         if (result == SQLITE_DONE) {
             return true;
@@ -204,7 +227,7 @@ namespace detail {
     constexpr std::string_view begin_immediate = "BEGIN IMMEDIATE;";
     constexpr std::string_view begin_exclusive = "BEGIN EXCLUSIVE;";
 
-    std::string_view begin_transaction(transaction type) {
+    inline std::string_view begin_transaction(transaction type) {
         if (type == transaction::deferred) {
             return begin_deferred;
         } else if (type == transaction::immediate) {
@@ -214,7 +237,7 @@ namespace detail {
         }
     }
 
-    std::string sql_command(std::string_view cmd, std::string_view arg) {
+    inline std::string sql_command(std::string_view cmd, std::string_view arg) {
         std::string out(cmd.size() + arg.size() + 2, '\0');
         std::ranges::copy(cmd, out.data());
         out[cmd.size()] = ' ';
@@ -237,7 +260,8 @@ class cursor
         using difference_type = ptrdiff_t;
 
         iterator() = default;
-        iterator(std::shared_ptr<sqlite3_stmt> stmt, convert conv) : m_stmt(std::move(stmt)), m_conv(conv) {
+        iterator(std::shared_ptr<sqlite3_stmt> stmt, convert conv, bool done) : 
+            m_stmt(std::move(stmt)), m_conv(conv), m_done(done) {
             if (sqlite3_column_count(m_stmt.get()) != detail::row_size<Types...>()) {
                 throw std::out_of_range("Mismatch between query column count and extraction field count");
             }
@@ -258,17 +282,19 @@ class cursor
     private:
         std::shared_ptr<sqlite3_stmt> m_stmt;
         convert m_conv = convert::off;
-        bool m_done = false;
+        bool m_done = true;
     };
 
 public:
-    cursor(std::shared_ptr<sqlite3_stmt> stmt, convert conv) : m_stmt(std::move(stmt)), m_conv(conv) {}
-    iterator begin() { return iterator(m_stmt, m_conv); }
+    cursor(std::shared_ptr<sqlite3_stmt> stmt, convert conv, bool done) : 
+        m_stmt(std::move(stmt)), m_conv(conv), m_done(done) {}
+    iterator begin() { return iterator(m_stmt, m_conv, m_done); }
     sentinel end() { return sentinel{}; }
 
 private:
     std::shared_ptr<sqlite3_stmt> m_stmt;
-    convert m_conv = convert::off;
+    convert m_conv;
+    bool m_done;
 };
 
 template <typename T>
@@ -283,7 +309,8 @@ class value_cursor
         using difference_type = ptrdiff_t;
 
         iterator() = default;
-        iterator(std::shared_ptr<sqlite3_stmt> stmt, convert conv) : m_stmt(std::move(stmt)), m_conv(conv) {
+        iterator(std::shared_ptr<sqlite3_stmt> stmt, convert conv, bool done) : 
+            m_stmt(std::move(stmt)), m_conv(conv), m_done(done) {
             if (sqlite3_column_count(m_stmt.get()) != detail::row_size<T>()) {
                 throw std::out_of_range("Mismatch between query column count and extraction field count");
             }
@@ -293,6 +320,7 @@ class value_cursor
             m_done = detail::step(m_stmt.get());
             return *this;
         }
+        void operator++(int) { ++*this; }
         
         T operator*() const {
             int i = 0;
@@ -303,17 +331,19 @@ class value_cursor
     private:
         std::shared_ptr<sqlite3_stmt> m_stmt;
         convert m_conv = convert::off;
-        bool m_done = false;
+        bool m_done = true;
     };
 
 public:
-    value_cursor(std::shared_ptr<sqlite3_stmt> stmt, convert conv) : m_stmt(std::move(stmt)), m_conv(conv) {}
-    iterator begin() { return iterator(m_stmt, m_conv); }
+    value_cursor(std::shared_ptr<sqlite3_stmt> stmt, convert conv, bool done) : 
+        m_stmt(std::move(stmt)), m_conv(conv), m_done(done) {}
+    iterator begin() { return iterator(m_stmt, m_conv, m_done); }
     sentinel end() { return sentinel{}; }
 
 private:
     std::shared_ptr<sqlite3_stmt> m_stmt;
-    convert m_conv = convert::off;
+    convert m_conv;
+    bool m_done;
 };
 
 class statement
@@ -328,46 +358,36 @@ public:
         }
         m_reset = true;
 
-        int index = 1;
+        [[maybe_unused]] int index = 1;
         (bind(args, index), ...);
-        m_fetchable = !detail::step(m_stmt.get());
+        m_done = detail::step(m_stmt.get());
 
         return *this;
     }
 
     template <typename... Types>
     cursor<Types...> fetch(convert conversion = convert::off) {
-        check_fetchable();
-        return cursor<Types...>(m_stmt, conversion);
+        return cursor<Types...>(m_stmt, conversion, m_done);
     }
 
     template <typename... Types>
     auto fetch_single(convert conversion = convert::off) {
-        check_fetchable();
-        return *cursor<Types...>(m_stmt, conversion).begin();
+        return *cursor<Types...>(m_stmt, conversion, m_done).begin();
     }
 
     template <typename T>
     value_cursor<T> fetch_value(convert conversion = convert::off) {
-        check_fetchable();
-        return value_cursor<T>(m_stmt, conversion);
+        return value_cursor<T>(m_stmt, conversion, m_done);
     }
 
     template <typename T>
     auto fetch_single_value(convert conversion = convert::off) {
-        check_fetchable();
-        return *value_cursor<T>(m_stmt, conversion).begin();
+        return *value_cursor<T>(m_stmt, conversion, m_done).begin();
     }
 
 private:
     static void stmt_deleter(sqlite3_stmt* ptr) {
         detail::check(sqlite3_finalize(ptr));
-    }
-
-    void check_fetchable() const {
-        if (!m_fetchable) {
-            throw std::runtime_error("No rows to fetch");
-        }
     }
 
     template <typename T>
@@ -397,8 +417,8 @@ private:
         } else if constexpr (std::is_convertible_v<T, std::string_view>) {
             std::string_view view(val);
             detail::check(sqlite3_bind_text(m_stmt.get(), index, view.data(), view.size(), SQLITE_TRANSIENT));
-        } else if constexpr (std::is_convertible_v<T, std::span<std::byte>>) {
-            std::span<std::byte> span(val);
+        } else if constexpr (detail::is_byte_span_convertible<T>) {
+            auto span = std::as_bytes(std::span(val));
             detail::check(sqlite3_bind_blob(m_stmt.get(), index, span.data(), span.size(), SQLITE_TRANSIENT));
         } else {
             SLATE_STATIC_FAIL("Invalid input type");
@@ -409,7 +429,7 @@ private:
 
     std::shared_ptr<sqlite3_stmt> m_stmt;
     bool m_reset = false;
-    bool m_fetchable = false;
+    bool m_done = false;
 };
 
 class db
