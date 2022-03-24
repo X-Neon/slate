@@ -87,6 +87,10 @@ namespace detail {
     template <typename T, typename A>
     struct is_vector<std::vector<T, A>> : public std::true_type { using type = T; };
 
+    template <typename T>
+    concept is_trivial_vector = is_vector<T>::value && std::is_trivial_v<typename T::value_type>&& 
+                                !std::is_same_v<typename T::value_type, bool>;
+
 #ifdef SLATE_USE_PFR
     template <std::size_t I>
     using size_constant = std::integral_constant<std::size_t, I>;
@@ -189,7 +193,7 @@ namespace detail {
             check_convert(stmt, index, SQLITE_TEXT, conv);
             auto ptr = reinterpret_cast<const char*>(sqlite3_column_text(stmt, index++));
             return std::string(ptr);
-        } else if constexpr (is_vector<T>()) {
+        } else if constexpr (is_trivial_vector<T>) {
             check_convert(stmt, index, SQLITE_BLOB, conv);
             int size = sqlite3_column_bytes(stmt, index);
             if (size == 0) {
