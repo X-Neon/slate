@@ -25,4 +25,9 @@ TEST_CASE("error") {
     SECTION("extracting more fields than in the row (via an aggregate) throws an exception") {
         REQUIRE_THROWS_AS(result.fetch_single<too_many>(), std::out_of_range);
     }
+
+    SECTION("attempting to fetch rows multiple times throws an exception") {
+        result.fetch<int, int>();
+        REQUIRE_THROWS_AS((result.fetch<int, int>()), std::runtime_error);
+    }
 }

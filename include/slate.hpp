@@ -348,15 +348,22 @@ private:
 
 class statement
 {
+    enum class state
+    {
+        clean,
+        executed,
+        fetched
+    };
+
 public:
     statement(sqlite3_stmt* s) : m_stmt(s, stmt_deleter) {}
 
     template <typename... Args>
     statement& execute(const Args&... args) {
-        if (m_reset) {
+        if (m_state != state::clean) {
             detail::check(sqlite3_reset(m_stmt.get()));
         }
-        m_reset = true;
+        m_state = state::executed;
 
         [[maybe_unused]] int index = 1;
         (bind(args, index), ...);
@@ -367,27 +374,39 @@ public:
 
     template <typename... Types>
     cursor<Types...> fetch(convert conversion = convert::off) {
+        transition_to_fetched();
         return cursor<Types...>(m_stmt, conversion, m_done);
     }
 
     template <typename... Types>
     auto fetch_single(convert conversion = convert::off) {
+        transition_to_fetched();
         return *cursor<Types...>(m_stmt, conversion, m_done).begin();
     }
 
     template <typename T>
     value_cursor<T> fetch_value(convert conversion = convert::off) {
+        transition_to_fetched();
         return value_cursor<T>(m_stmt, conversion, m_done);
     }
 
     template <typename T>
     auto fetch_single_value(convert conversion = convert::off) {
+        transition_to_fetched();
         return *value_cursor<T>(m_stmt, conversion, m_done).begin();
     }
 
 private:
     static void stmt_deleter(sqlite3_stmt* ptr) {
         detail::check(sqlite3_finalize(ptr));
+    }
+
+    void transition_to_fetched() {
+        if (m_state == state::fetched) {
+            throw std::runtime_error("Rows can only be fetched once");
+        }
+
+        m_state = state::fetched;
     }
 
     template <typename T>
@@ -428,7 +447,7 @@ private:
     }
 
     std::shared_ptr<sqlite3_stmt> m_stmt;
-    bool m_reset = false;
+    state m_state = state::clean;
     bool m_done = false;
 };
 
