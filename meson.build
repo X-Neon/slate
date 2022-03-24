@@ -13,6 +13,7 @@ if get_option('build-tests')
     sqlite3 = dependency('sqlite3')
 
     test_sources = files(
+        'test/aggregate.cpp',
         'test/convert.cpp',
         'test/error.cpp',
         'test/main.cpp',
