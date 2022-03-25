@@ -16,6 +16,8 @@ if get_option('build-tests')
         'test/aggregate.cpp',
         'test/convert.cpp',
         'test/error.cpp',
+        'test/function.cpp',
+        'test/iterate.cpp',
         'test/main.cpp',
         'test/optional.cpp',
         'test/transaction.cpp',

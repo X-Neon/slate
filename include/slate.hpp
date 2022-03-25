@@ -1,13 +1,15 @@
 #pragma once
 
-#include <sqlite3.h>
-#include <string_view>
+#include <cstring>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <span>
-#include <vector>
+#include <sqlite3.h>
+#include <string_view>
 #include <string>
-#include <cstring>
+#include <variant>
+#include <vector>
 
 #if defined __has_include
 #   if __has_include (<boost/pfr.hpp>)
@@ -26,6 +28,9 @@
 namespace slate {
 
 SLATE_PFR_NAMESPACE;
+
+using any = std::variant<int64_t, double, std::string_view, std::span<const std::byte>, std::nullopt_t>;
+using any_return = std::variant<int64_t, double, std::string, std::vector<std::byte>, std::nullopt_t>;
 
 class exception : public std::exception
 {
@@ -69,11 +74,33 @@ enum class open
     no_follow = SQLITE_OPEN_NOFOLLOW
 };
 
+enum class function
+{
+    non_pure = SQLITE_UTF8,
+    pure = SQLITE_UTF8 | SQLITE_DETERMINISTIC
+};
+
 constexpr open operator|(const open& a, const open& b) {
     return open{static_cast<int>(a) | static_cast<int>(b)};
 }
 
 namespace detail {
+
+    template <auto Start, auto End, auto Inc, class F>
+    constexpr void constexpr_for(F&& f) {
+        if constexpr (Start < End) {
+            f(std::integral_constant<decltype(Start), Start>());
+            constexpr_for<Start + Inc, End, Inc>(f);
+        }
+    }
+
+    template <class F, class Tuple>
+    constexpr void constexpr_for_tuple(F&& f, Tuple&& tuple) {
+        constexpr size_t size = std::tuple_size_v<std::decay_t<Tuple>>;
+        constexpr_for<0UL, size, 1UL>([&](auto i) {
+            f(std::get<i.value>(tuple));
+        });
+    }
 
     template <typename T>
     struct is_optional : public std::false_type {};
@@ -88,8 +115,33 @@ namespace detail {
     struct is_vector<std::vector<T, A>> : public std::true_type { using type = T; };
 
     template <typename T>
+    struct is_variant : public std::false_type {};
+
+    template <typename... T>
+    struct is_variant<std::variant<T...>> : public std::true_type {};
+
+    template <typename T>
     concept is_trivial_vector = is_vector<T>::value && std::is_trivial_v<typename T::value_type>&& 
                                 !std::is_same_v<typename T::value_type, bool>;
+
+    template <typename T>
+    concept is_span_trivial = std::is_trivial_v<typename T::value_type>;
+
+    template <typename T>
+    concept is_byte_span_convertible = requires(T a) {
+        std::as_bytes(std::span(a));
+        { std::span(a) } -> is_span_trivial;
+    };
+
+    template <typename T>
+    struct function_traits {};
+
+    template <typename R, typename... T>
+    struct function_traits<std::function<R(T...)>*>
+    {
+        using return_t = R;
+        using args_t = std::tuple<T...>;
+    };
 
 #ifdef SLATE_USE_PFR
     template <std::size_t I>
@@ -100,7 +152,7 @@ namespace detail {
 
     template <typename T>
     constexpr int field_size() {
-        if constexpr (std::is_aggregate_v<T>) {
+        if constexpr (std::is_aggregate_v<T> && !std::is_array_v<T>) {
             return aggregate_size<T, size_constant<0>, size_constant<pfr::tuple_size_v<T>>>();
         } else {
             return 1;
@@ -131,15 +183,6 @@ namespace detail {
     }
 #endif
 
-    template <typename T>
-    concept is_span_trivial = std::is_trivial_v<typename T::value_type>;
-
-    template <typename T>
-    concept is_byte_span_convertible = requires(T a) {
-        std::as_bytes(std::span(a));
-        { std::span(a) } -> is_span_trivial;
-    };
-
     inline void check_convert(sqlite3_stmt* stmt, int index, int desired, convert c) {
         if (c == convert::on) {
             return;
@@ -155,23 +198,24 @@ namespace detail {
         }
     }
 
-    template <typename T, typename... Ts>
-    auto build_tuple(sqlite3_stmt* stmt, int& index, convert conv) {
-        if constexpr (sizeof...(Ts) == 0) {
-            return std::tuple<T>{extract<T>(stmt, index, conv)};
-        } else {
-            auto t = std::tuple<T>{extract<T>(stmt, index, conv)};
-            return std::tuple_cat(std::move(t), build_tuple<Ts...>(stmt, index, conv));
-        }
+    template <typename... T>
+    auto fetch_values(sqlite3_stmt* stmt, convert conv) {
+        std::tuple<T...> values;
+        int index = 0;
+        constexpr_for_tuple([&](auto&& val) {
+            val = extract_from_column<std::remove_reference_t<decltype(val)>>(stmt, index, conv);
+        }, values);
+
+        return values;
     }
 
     template <typename T>
-    T extract(sqlite3_stmt* stmt, int& index, convert conv) {
+    T extract_from_column(sqlite3_stmt* stmt, int& index, convert conv) {
 #ifdef SLATE_USE_PFR
         if constexpr (std::is_aggregate_v<T> && !std::is_array_v<T>) {
             T val;
             pfr::for_each_field(val, [&](auto& v) {
-                v = extract<std::remove_reference_t<decltype(v)>>(stmt, index, conv);
+                v = extract_from_column<std::remove_reference_t<decltype(v)>>(stmt, index, conv);
             });
             return val;
         } else
@@ -179,9 +223,10 @@ namespace detail {
 
         if constexpr (is_optional<T>()) {
             if (sqlite3_column_type(stmt, index) == SQLITE_NULL) {
+                index++;
                 return {};
             } else {
-                return extract<typename is_optional<T>::type>(stmt, index, conv);
+                return extract_from_column<typename is_optional<T>::type>(stmt, index, conv);
             }
         } else if constexpr (std::is_integral_v<T>) {
             check_convert(stmt, index, SQLITE_INTEGER, conv);
@@ -207,6 +252,83 @@ namespace detail {
             return vec;
         } else {
             SLATE_STATIC_FAIL("Invalid output type");
+        }
+    }
+
+    template <typename Tuple>
+    auto create_function_args(sqlite3_value** values) {
+        Tuple args;
+        constexpr_for_tuple([&](auto&& arg) {
+            arg = extract_from_values<std::remove_reference_t<decltype(arg)>>(values++);
+        }, args);
+
+        return args;
+    }
+
+    template <typename T>
+    T extract_from_values(sqlite3_value** values) {
+        if constexpr (std::is_same_v<T, any>) {
+            auto type = sqlite3_value_type(*values);
+            if (type == SQLITE_INTEGER) {
+                return extract_from_values<int64_t>(values);
+            } else if (type == SQLITE_FLOAT) {
+                return extract_from_values<double>(values);
+            } else if (type == SQLITE_TEXT) {
+                return extract_from_values<std::string_view>(values);
+            } else if (type == SQLITE_BLOB) {
+                return extract_from_values<std::span<const std::byte>>(values);
+            } else {
+                return std::nullopt;
+            }
+        } else if constexpr (is_optional<T>() && !std::is_same_v<typename is_optional<T>::type, any>) {
+            if (sqlite3_value_type(*values) == SQLITE_NULL) {
+                values++;
+                return {};
+            } else {
+                return extract_from_values<typename is_optional<T>::type>(values);
+            }
+        } else if constexpr (std::is_integral_v<T>) {
+            return sqlite3_value_int64(*values++);
+        } else if constexpr (std::is_floating_point_v<T>) {
+            return sqlite3_value_double(*values++);
+        } else if constexpr (std::is_same_v<T, std::string_view>) {
+            auto ptr = reinterpret_cast<const char*>(sqlite3_value_text(*values));
+            return std::string_view(ptr);
+        } else if constexpr (std::is_same_v<T, std::span<const std::byte>>) {
+            int size = sqlite3_value_bytes(*values);
+            auto ptr = reinterpret_cast<const std::byte*>(sqlite3_value_blob(*values));
+            return std::span<const std::byte>(ptr, size);
+        } else {
+            SLATE_STATIC_FAIL("Invalid argument type");
+        }
+    }
+
+    template <typename T>
+    void set_function_return_value(sqlite3_context* context, T value) {
+        if constexpr (is_variant<T>()) {
+            std::visit([&](auto v) {
+                set_function_return_value(context, v);
+            }, value);
+        } else if constexpr (detail::is_optional<T>()) {
+            if (value) {
+                set_function_return_value(context, *value);
+            } else {
+                sqlite3_result_null(context);
+            }
+        } else if constexpr (std::is_integral_v<T>) {
+            sqlite3_result_int64(context, value);
+        } else if constexpr (std::is_floating_point_v<T>) {
+            sqlite3_result_double(context, value);
+        } else if constexpr (std::is_same_v<T, std::nullopt_t>) {
+            sqlite3_result_null(context);
+        } else if constexpr (std::is_convertible_v<T, std::string_view>) {
+            std::string_view view(value);
+            sqlite3_result_text(context, view.data(), view.size(), SQLITE_TRANSIENT);
+        } else if constexpr (detail::is_byte_span_convertible<T>) {
+            auto span = std::as_bytes(std::span(value));
+            sqlite3_result_blob(context, span.data(), span.size(), SQLITE_TRANSIENT);
+        } else {
+            SLATE_STATIC_FAIL("Invalid input type");
         }
     }
 
@@ -278,8 +400,7 @@ class cursor
         void operator++(int) { ++*this; }
         
         std::tuple<Types...> operator*() const {
-            int i = 0;
-            return detail::build_tuple<Types...>(m_stmt.get(), i, m_conv); 
+            return detail::fetch_values<Types...>(m_stmt.get(), m_conv);
         }
         bool operator==(const sentinel&) const noexcept { return m_done; }
 
@@ -328,7 +449,7 @@ class value_cursor
         
         T operator*() const {
             int i = 0;
-            return detail::extract<T>(m_stmt.get(), i, m_conv); 
+            return detail::extract_from_column<T>(m_stmt.get(), i, m_conv); 
         }
         bool operator==(const sentinel&) const noexcept { return m_done; }
 
@@ -493,9 +614,39 @@ public:
         return m_db.get();
     }
 
+    template <typename F>
+    void declare(std::string_view name, function type, F&& func) {
+        auto func_ptr = new std::function(std::move(func));
+
+        detail::check(sqlite3_create_function_v2(
+            m_db.get(), 
+            name.data(), 
+            std::tuple_size_v<typename detail::function_traits<decltype(func_ptr)>::args_t>, 
+            static_cast<int>(type),
+            reinterpret_cast<void*>(func_ptr),
+            &invoker<decltype(func_ptr)>,
+            nullptr,
+            nullptr,
+            &function_deleter<decltype(func_ptr)>
+        ));
+    }
+
 private:
     static void db_deleter(sqlite3* ptr) {
         detail::check(sqlite3_close_v2(ptr));
+    }
+
+    template <typename F>
+    static void function_deleter(void* ptr) {
+        delete static_cast<F>(ptr);
+    }
+
+    template <typename F>
+    static void invoker(sqlite3_context* c, int n, sqlite3_value** values) {
+        auto func = reinterpret_cast<F>(sqlite3_user_data(c));
+        auto args = detail::create_function_args<typename detail::function_traits<F>::args_t>(values);
+        auto return_value = std::apply(*func, args);
+        detail::set_function_return_value(c, return_value);
     }
 
     sqlite_ptr m_db;
