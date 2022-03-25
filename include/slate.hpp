@@ -478,6 +478,10 @@ public:
         return prepare(cmd).execute(args...);
     }
 
+    int64_t last_insert_rowid() const {
+        return sqlite3_last_insert_rowid(m_db.get());
+    }
+
     void begin_transaction(transaction type = transaction::deferred) { execute(detail::begin_transaction(type)); }
     void commit() { execute("END;"); }
     void rollback() { execute("ROLLBACK;"); }
