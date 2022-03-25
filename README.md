@@ -72,7 +72,7 @@ db.execute("INSERT INTO table (a) VALUES (?)", std::optional<int>(10)); // Inser
 db.execute("INSERT INTO table (a) VALUES (?)", std::optional<int>()); // Inserts NULL
 
 for (auto opt : db.execute("SELECT a FROM table").fetch_value<std::optional<int>>()) {
-    if (opt.value) {
+    if (opt.has_value()) {
         // INTEGER
     } else {
         // NULL
