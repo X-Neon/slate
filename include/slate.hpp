@@ -618,10 +618,15 @@ public:
     void declare(std::string_view name, function type, F&& func) {
         auto func_ptr = new std::function(std::move(func));
 
+        using args_t = detail::function_traits<decltype(func_ptr)>::args_t;
+        constexpr bool var_args = std::tuple_size_v<args_t> == 1 && 
+                                  detail::is_vector<std::tuple_element_t<0, args_t>>();
+        constexpr int n_args = var_args ? -1 : int(std::tuple_size_v<args_t>);
+
         detail::check(sqlite3_create_function_v2(
             m_db.get(), 
             name.data(), 
-            std::tuple_size_v<typename detail::function_traits<decltype(func_ptr)>::args_t>, 
+            n_args, 
             static_cast<int>(type),
             reinterpret_cast<void*>(func_ptr),
             &invoker<decltype(func_ptr)>,
@@ -643,10 +648,23 @@ private:
 
     template <typename F>
     static void invoker(sqlite3_context* c, int n, sqlite3_value** values) {
+        using args_t = detail::function_traits<F>::args_t;
+        
         auto func = reinterpret_cast<F>(sqlite3_user_data(c));
-        auto args = detail::create_function_args<typename detail::function_traits<F>::args_t>(values);
-        auto return_value = std::apply(*func, args);
-        detail::set_function_return_value(c, return_value);
+        if constexpr (std::tuple_size_v<args_t> == 1 && detail::is_vector<std::tuple_element_t<0, args_t>>()) {
+            using T = detail::is_vector<std::tuple_element_t<0, args_t>>::type;
+            
+            std::vector<T> args;
+            for (int i = 0; i < n; ++i) {
+                args.push_back(detail::extract_from_values<T>(&values[i]));
+            }
+            auto return_value = (*func)(std::move(args));
+            detail::set_function_return_value(c, return_value);
+        } else {
+            auto args = detail::create_function_args<args_t>(values);
+            auto return_value = std::apply(*func, args);
+            detail::set_function_return_value(c, return_value);
+        }
     }
 
     sqlite_ptr m_db;

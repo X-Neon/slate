@@ -19,13 +19,25 @@ slate::any_return double_val(slate::any v) {
     }
 }
 
+double new_sum(std::vector<double> v) {
+    return std::accumulate(v.begin(), v.end(), 0.0);
+}
+
 TEST_CASE("function") {
     slate::db db(":memory:");
-    db.declare("double_val", slate::function::pure, double_val);
-    
-    REQUIRE(db.execute("SELECT double_val(?)", 2).fetch_single_value<int>() == 4);
-    REQUIRE(db.execute("SELECT double_val(?)", 0.5).fetch_single_value<double>() == 1.0);
-    REQUIRE(db.execute("SELECT double_val(?)", "str").fetch_single_value<std::string>() == "strstr");
-    REQUIRE(db.execute("SELECT double_val(?)", std::vector<int>{1,2}).fetch_single_value<std::vector<int>>() == std::vector<int>{1,2,1,2});
-    REQUIRE(db.execute("SELECT double_val(?)", std::nullopt).fetch_single_value<std::optional<int>>() == std::nullopt);
+
+    SECTION("test double_val") {
+        constexpr auto query = "SELECT double_val(?)";
+        db.declare("double_val", slate::function::pure, double_val);
+        REQUIRE(db.execute(query, 2).fetch_single_value<int>() == 4);
+        REQUIRE(db.execute(query, 0.5).fetch_single_value<double>() == 1.0);
+        REQUIRE(db.execute(query, "str").fetch_single_value<std::string>() == "strstr");
+        REQUIRE(db.execute(query, std::vector<int>{1,2}).fetch_single_value<std::vector<int>>() == std::vector<int>{1,2,1,2});
+        REQUIRE(db.execute(query, std::nullopt).fetch_single_value<std::optional<int>>() == std::nullopt);
+    }
+
+    SECTION("test new_sum") {
+        db.declare("new_sum", slate::function::pure, new_sum);
+        REQUIRE(db.execute("SELECT new_sum(?, ?, ?, ?)", 1, 2, 3, 4).fetch_single_value<double>() == 10);
+    }
 }
