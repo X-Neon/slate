@@ -84,6 +84,19 @@ constexpr open operator|(const open& a, const open& b) {
     return open{static_cast<int>(a) | static_cast<int>(b)};
 }
 
+template <typename T>
+struct serializer {};
+
+template <typename T>
+concept is_serializable = requires(T a) {
+    serializer<T>::to_sql(a);
+};
+
+template <typename T>
+concept is_deserializable = requires {
+    serializer<T>::from_sql;
+};
+
 namespace detail {
 
     template <auto Start, auto End, auto Inc, class F>
@@ -143,6 +156,12 @@ namespace detail {
         using args_t = std::tuple<T...>;
     };
 
+    template <typename T>
+    struct deserializer_arg {};
+
+    template <typename R, typename T>
+    struct deserializer_arg<R(*)(T)> { using type = T; };
+
 #ifdef SLATE_USE_PFR
     template <std::size_t I>
     using size_constant = std::integral_constant<std::size_t, I>;
@@ -152,7 +171,10 @@ namespace detail {
 
     template <typename T>
     constexpr int field_size() {
-        if constexpr (std::is_aggregate_v<T> && !std::is_array_v<T>) {
+        if constexpr (slate::is_deserializable<T>) {
+            using arg_t = deserializer_arg<decltype(&slate::serializer<T>::from_sql)>::type;
+            return field_size<arg_t>();
+        } else if constexpr (std::is_aggregate_v<T> && !std::is_array_v<T>) {
             return aggregate_size<T, size_constant<0>, size_constant<pfr::tuple_size_v<T>>>();
         } else {
             return 1;
@@ -211,6 +233,10 @@ namespace detail {
 
     template <typename T>
     T extract_from_column(sqlite3_stmt* stmt, int& index, convert conv) {
+        if constexpr (is_deserializable<T>) {
+            using arg_t = detail::deserializer_arg<decltype(&slate::serializer<T>::from_sql)>::type;
+            return serializer<T>::from_sql(extract_from_column<arg_t>(stmt, index, conv));
+        } else
 #ifdef SLATE_USE_PFR
         if constexpr (std::is_aggregate_v<T> && !std::is_array_v<T>) {
             T val;
@@ -220,7 +246,6 @@ namespace detail {
             return val;
         } else
 #endif
-
         if constexpr (is_optional<T>()) {
             if (sqlite3_column_type(stmt, index) == SQLITE_NULL) {
                 index++;
@@ -536,6 +561,10 @@ private:
 
     template <typename T>
     void bind(const T& val, int& index) {
+        if constexpr (is_serializable<T>) {
+            bind(serializer<T>::to_sql(val), index);
+            return;
+        } else
 #ifdef SLATE_USE_PFR
         if constexpr (std::is_aggregate_v<T> && !std::is_array_v<T>) {
             pfr::for_each_field(val, [&](const auto& v) {
@@ -544,7 +573,6 @@ private:
             return;
         } else
 #endif
-
         if constexpr (detail::is_optional<T>()) {
             if (val) {
                 bind(*val, index);

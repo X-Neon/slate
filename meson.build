@@ -20,6 +20,7 @@ if get_option('build-tests')
         'test/iterate.cpp',
         'test/main.cpp',
         'test/optional.cpp',
+        'test/serializer.cpp',
         'test/transaction.cpp',
         'test/tuple.cpp'
     )
