@@ -80,6 +80,47 @@ for (auto opt : db.execute("SELECT a FROM table").fetch_value<std::optional<int>
 }
 ```
 
+### Custom serialization/deserialization
+
+```cpp
+class my_int
+{
+public:
+    my_int(int val) : m_val(val) {}
+    const int& get() const { return m_val; }
+
+private:
+    int m_val;
+};
+
+namespace slate {
+    template <>
+    struct serializer<my_int>
+    {
+        static int to_sql(const my_int& v) {
+            return v.get();
+        }
+
+        static my_int from_sql(int v) {
+            return v;
+        }
+    };
+}
+
+db.execute("INSERT INTO test (a) VALUES (?)", my_int(10));
+db.execute("SELECT a FROM test").fetch_single_value<my_int>();
+```
+
+### Custom functions
+
+```cpp
+db.declare("pow", slate::function::pure, [](double base, double exp) {
+    return std::pow(base, exp);
+});
+
+db.execute("SELECT pow(?, ?)", 5, 2).fetch_single_value<double>(); // 25.0
+```
+
 ## Input/Output Types
 
 | SQL  | Input                                               | Output                                            |
@@ -99,6 +140,20 @@ db.execute("INSERT INTO table (a) VALUES (?)", std::nullopt);
 int no_convert = db.execute("SELECT a FROM table").fetch_single_value<int>(); // Throws
 int converted = db.execute("SELECT a FROM table").fetch_single_value<int>(slate::convert::on); // 0
 ```
+
+## Custom functions
+
+| SQL  | Arguments                    | Return value                                        |
+|------|------------------------------|-----------------------------------------------------|
+| INT  | Any integral value           | Any integral type                                   |
+| REAL | Any floating point type      | Any floating point type                             |
+| TEXT | `std::string_view`           | Convertible to `std::string_view`                   |
+| BLOB | `std::span<const std::byte>` | Convertible to `std::span<T>`, where `T` is trivial |
+| NULL | N/A                          | `std::nullopt_t`                                    |
+
+Much like the rest of Slate, custom functions may accept and return `std::optional<T>` to represent `T` or NULL. Unlike the rest of Slate, custom functions may also accept certain `std::variant` types - `slate::any` can be used as an argument type, which is a variant of all possible input types, and any variant of valid return types is also a valid return type. Also unlike the rest of Slate, function arguments are always converted to the required type.
+
+Slate currently only supports custom scalar functions.
 
 ## Requirements
 
