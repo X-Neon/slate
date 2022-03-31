@@ -87,16 +87,6 @@ constexpr open operator|(const open& a, const open& b) {
 template <typename T>
 struct serializer {};
 
-template <typename T>
-concept is_serializable = requires(T a) {
-    serializer<T>::to_sql(a);
-};
-
-template <typename T>
-concept is_deserializable = requires {
-    serializer<T>::from_sql;
-};
-
 namespace detail {
 
     template <auto Start, auto End, auto Inc, class F>
@@ -162,6 +152,16 @@ namespace detail {
     template <typename R, typename T>
     struct deserializer_arg<R(*)(T)> { using type = T; };
 
+    template <typename T>
+    concept is_serializable = requires(T a) {
+        serializer<T>::to_sql(a);
+    };
+
+    template <typename T>
+    concept is_deserializable = requires {
+        serializer<T>::from_sql;
+    };
+
 #ifdef SLATE_USE_PFR
     template <std::size_t I>
     using size_constant = std::integral_constant<std::size_t, I>;
@@ -171,7 +171,7 @@ namespace detail {
 
     template <typename T>
     constexpr int field_size() {
-        if constexpr (slate::is_deserializable<T>) {
+        if constexpr (is_deserializable<T>) {
             using arg_t = deserializer_arg<decltype(&slate::serializer<T>::from_sql)>::type;
             return field_size<arg_t>();
         } else if constexpr (std::is_aggregate_v<T> && !std::is_array_v<T>) {
@@ -397,7 +397,57 @@ namespace detail {
         return out;
     }
 
+    template <typename T>
+    constexpr bool is_input_t() {
+#ifdef SLATE_USE_PFR
+        if constexpr (std::is_aggregate_v<T> && !std::is_array_v<T>) {
+            bool valid = true;
+            constexpr_for<0, pfr::tuple_size_v<T>, 1>([&](auto i) {
+                valid = valid && is_input_t<pfr::tuple_element_t<i, T>>();
+            });
+
+            return valid;
+        } else
+#endif
+        if constexpr (is_optional<T>()) {
+            return is_input_t<typename is_optional<T>::type>();
+        } else if constexpr (is_serializable<T>) {
+            return is_input_t<decltype(serializer<T>::to_sql(std::declval<T>()))>();
+        } else {
+            return std::is_integral_v<T> || std::is_floating_point_v<T> || std::is_same_v<T, std::nullopt_t> ||
+                   std::is_convertible_v<T, std::string_view> || is_byte_span_convertible<T>;
+        }
+    }
+
+    template <typename T>
+    constexpr bool is_output_t() {
+#ifdef SLATE_USE_PFR
+        if constexpr (std::is_aggregate_v<T> && !std::is_array_v<T>) {
+            bool valid = true;
+            constexpr_for<0, pfr::tuple_size_v<T>, 1>([&](auto i) {
+                valid = valid && is_output_t<pfr::tuple_element_t<i, T>>();
+            });
+
+            return valid;
+        } else
+#endif
+        if constexpr (is_optional<T>()) {
+            return is_input_t<typename is_optional<T>::type>();
+        } else if constexpr (is_deserializable<T>) {
+            return is_input_t<typename deserializer_arg<decltype(&slate::serializer<T>::from_sql)>::type>();
+        } else {
+            return std::is_integral_v<T> || std::is_floating_point_v<T> ||
+                   std::is_same_v<T, std::string> || is_trivial_vector<T>;
+        }      
+    }
+
 } // namespace detail
+
+template <typename T>
+concept input = detail::is_input_t<T>();
+
+template <typename T>
+concept output = detail::is_output_t<T>();
 
 template <typename... Types>
 class cursor
@@ -508,7 +558,7 @@ class statement
 public:
     statement(sqlite3_stmt* s) : m_stmt(s, stmt_deleter) {}
 
-    template <typename... Args>
+    template <input... Args>
     statement& execute(const Args&... args) {
         if (m_state != state::clean) {
             detail::check(sqlite3_reset(m_stmt.get()));
@@ -522,25 +572,25 @@ public:
         return *this;
     }
 
-    template <typename... Types>
+    template <output... Types>
     cursor<Types...> fetch(convert conversion = convert::off) {
         transition_to_fetched();
         return cursor<Types...>(m_stmt, conversion, m_done);
     }
 
-    template <typename... Types>
+    template <output... Types>
     auto fetch_single(convert conversion = convert::off) {
         transition_to_fetched();
         return *cursor<Types...>(m_stmt, conversion, m_done).begin();
     }
 
-    template <typename T>
+    template <output T>
     value_cursor<T> fetch_value(convert conversion = convert::off) {
         transition_to_fetched();
         return value_cursor<T>(m_stmt, conversion, m_done);
     }
 
-    template <typename T>
+    template <output T>
     auto fetch_single_value(convert conversion = convert::off) {
         transition_to_fetched();
         return *value_cursor<T>(m_stmt, conversion, m_done).begin();
@@ -561,7 +611,7 @@ private:
 
     template <typename T>
     void bind(const T& val, int& index) {
-        if constexpr (is_serializable<T>) {
+        if constexpr (detail::is_serializable<T>) {
             bind(serializer<T>::to_sql(val), index);
             return;
         } else
@@ -622,7 +672,7 @@ public:
         return statement(stmt);
     }
 
-    template <typename... Types>
+    template <input... Types>
     statement execute(std::string_view cmd, const Types&... args) {
         return prepare(cmd).execute(args...);
     }
