@@ -664,7 +664,7 @@ public:
         detail::check(sqlite3_open_v2(filename.data(), &ptr, static_cast<int>(flags), nullptr));
         m_db = sqlite_ptr(ptr, db_deleter);
     }
-    db(std::string_view filename) : db(filename, open::read_write | open::create) {}
+    explicit db(std::string_view filename) : db(filename, open::read_write | open::create) {}
 
     statement prepare(std::string_view cmd) {
         sqlite3_stmt* stmt;
@@ -751,7 +751,7 @@ private:
 class scoped_transaction
 {
 public:
-    scoped_transaction(db& database, transaction type = transaction::deferred) : m_db(database.get_raw()) {
+    explicit scoped_transaction(db& database, transaction type = transaction::deferred) : m_db(database.get_raw()) {
         execute(detail::begin_transaction(type));
     }
     scoped_transaction(scoped_transaction&&) = delete;
