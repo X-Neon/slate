@@ -1,0 +1,8 @@
+{
+    "dependencies": [
+        "sqlite3",
+        "catch2",
+        "boost-pfr",
+        "boost-core"
+    ]
+}

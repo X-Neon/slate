@@ -1,0 +1,72 @@
+{
+  "version": 3,
+  "cmakeMinimumRequired": {
+    "major": 3,
+    "minor": 21,
+    "patch": 0
+  },
+  "configurePresets": [
+    {
+      "name": "ninja-multiconfiguration-vcpkg",
+      "displayName": "Ninja Multi-Config",
+      "description": "Configure with vcpkg toolchain and generate Ninja project files for all configurations",
+      "binaryDir": "${sourceDir}/build",
+      "generator": "Ninja Multi-Config",
+      "cacheVariables": {
+        "CMAKE_TOOLCHAIN_FILE": {
+          "type": "FILEPATH",
+          "value": "$env{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake"
+        },
+        "CMAKE_CONFIGURATION_TYPES": "Debug;Release;Asan",
+        "CMAKE_CXX_FLAGS_ASAN": "-g -fsanitize=address",
+        "CMAKE_EXE_LINKER_FLAGS_ASAN": "-fsanitize=address"
+      }
+    }
+  ],
+  "buildPresets": [
+    {
+      "name": "release",
+      "configurePreset": "ninja-multiconfiguration-vcpkg",
+      "displayName": "Release",
+      "description": "Build with Ninja the configuration specified with --config",
+      "configuration": "Release"
+    },
+    {
+      "name": "asan",
+      "configurePreset": "ninja-multiconfiguration-vcpkg",
+      "displayName": "Asan",
+      "description": "Build with Ninja the configuration specified with --config",
+      "configuration": "Asan"
+    },
+    {
+      "name": "debug",
+      "configurePreset": "ninja-multiconfiguration-vcpkg",
+      "displayName": "Debug",
+      "description": "Build with Ninja the configuration specified with --config",
+      "configuration": "Debug"
+    }
+  ],
+  "testPresets": [
+    {
+      "name": "release",
+      "configurePreset": "ninja-multiconfiguration-vcpkg",
+      "displayName": "Release",
+      "description": "Build with Ninja the configuration specified with --config",
+      "configuration": "Release"
+    },
+    {
+      "name": "asan",
+      "configurePreset": "ninja-multiconfiguration-vcpkg",
+      "displayName": "Asan",
+      "description": "Build with Ninja the configuration specified with --config",
+      "configuration": "Asan"
+    },
+    {
+      "name": "debug",
+      "configurePreset": "ninja-multiconfiguration-vcpkg",
+      "displayName": "Debug",
+      "description": "Build with Ninja the configuration specified with --config",
+      "configuration": "Debug"
+    }
+  ]
+}
