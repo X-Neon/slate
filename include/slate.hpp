@@ -220,17 +220,6 @@ namespace detail {
         }
     }
 
-    template <typename... T>
-    auto fetch_values(sqlite3_stmt* stmt, convert conv) {
-        std::tuple<T...> values;
-        int index = 0;
-        constexpr_for_tuple([&](auto&& val) {
-            val = extract_from_column<std::remove_reference_t<decltype(val)>>(stmt, index, conv);
-        }, values);
-
-        return values;
-    }
-
     template <typename T>
     T extract_from_column(sqlite3_stmt* stmt, int& index, convert conv) {
         if constexpr (is_deserializable<T>) {
@@ -280,14 +269,15 @@ namespace detail {
         }
     }
 
-    template <typename Tuple>
-    auto create_function_args(sqlite3_value** values) {
-        Tuple args;
-        constexpr_for_tuple([&](auto&& arg) {
-            arg = extract_from_values<std::remove_reference_t<decltype(arg)>>(values++);
-        }, args);
+    template <typename... T>
+    auto fetch_values(sqlite3_stmt* stmt, convert conv) {
+        std::tuple<T...> values;
+        int index = 0;
+        constexpr_for_tuple([&](auto&& val) {
+            val = extract_from_column<std::remove_reference_t<decltype(val)>>(stmt, index, conv);
+        }, values);
 
-        return args;
+        return values;
     }
 
     template <typename T>
@@ -326,6 +316,16 @@ namespace detail {
         } else {
             SLATE_STATIC_FAIL("Invalid argument type");
         }
+    }
+
+    template <typename Tuple>
+    auto create_function_args(sqlite3_value** values) {
+        Tuple args;
+        constexpr_for_tuple([&](auto&& arg) {
+            arg = extract_from_values<std::remove_reference_t<decltype(arg)>>(values++);
+        }, args);
+
+        return args;
     }
 
     template <typename T>

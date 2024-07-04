@@ -1,6 +1,8 @@
 #include "catch.hpp"
 #include "slate.hpp"
 
+#include <numeric>
+
 slate::any_return double_val(slate::any v) {
     if (v.index() == 0) {
         return 2 * std::get<0>(v);
